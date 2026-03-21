@@ -6,6 +6,29 @@ const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 const ABLY_API_KEY = import.meta.env.VITE_ABLY_API_KEY;
 const GAME_SESSION_KEY = 'promptcraft_game_session';
 const ROOM_CODE_LENGTH = 5;
+const GEMINI_MODEL_CANDIDATES = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+const SUPER_PROMPTS = [
+    // Image 1 — /images/1.jpg
+    "Warm cozy family dinner scene, 4 people laughing around a wooden dining table, soft candlelight illumination, modern home interior, natural skin tones, cinematic lighting, shallow depth of field, food on table (bread, salad, drinks), emotional storytelling, golden hour indoor lighting, photorealistic, 50mm lens, f/1.8, soft shadows, intimate composition, Netflix movie still style",
+
+    // Image 2 — /images/2.jpg
+    "Ultra-realistic cinematic night scene of the Great Pyramids of Giza under a vivid Milky Way galaxy, desert foreground with soft sand dunes, glowing moon near horizon, subtle warm lighting on pyramids, high dynamic range, astrophotography style, long exposure sky, deep contrast, volumetric lighting, ultra-detailed textures, 8k resolution, shot on Sony A7R IV, 24mm wide angle lens, f/1.8, dramatic composition, rule of thirds",
+
+    // Image 3 — /images/3.jpg
+    "A cute orange tabby kitten inside a realistic astronaut helmet, floating in space, earth visible in background, ultra-detailed fur, reflective glass helmet with light reflections, cinematic lighting, depth of field, NASA style realism, 3D hyperreal render, 8k resolution, sharp focus on eyes, soft blue glow, sci-fi aesthetic",
+
+    // Image 4 — /images/4.jpg
+    "A relaxed panda sitting on a beach chair wearing black sunglasses, holding a cold drink with straw, tropical beach background, soft pastel sky, ocean waves, summer vibe, cinematic lighting, ultra-realistic fur detail, depth of field, 85mm lens, lifestyle photography style, vibrant but balanced colors, high resolution",
+
+    // Image 5 — /images/5.jpg
+    "Dreamy pastel 3D landscape with cotton candy trees, soft rounded shapes, pink and blue color palette, small vintage van parked under tree, smooth textures, minimal aesthetic, soft lighting, volumetric fog, surreal environment, Pixar style render, ultra clean composition, high detail, soft shadows, isometric feel",
+
+    // Image 6 — /images/6.jpg
+    "Ultra-detailed royal golden ball gown on mannequin, intricate embroidery, gemstones, baroque patterns, luxurious fabric texture, dramatic studio lighting, dark elegant background, high fashion photography, 85mm lens, sharp focus, symmetrical composition, cinematic shadows, 8k detail, Vogue editorial style",
+
+    // Image 7 — /images/7.jpg
+    "Elderly woman sitting outdoors in snowy mountain cabin setting, holding a warm cup, beside a calm polar bear, emotional connection, ultra-realistic fur and skin texture, soft snowfall, cinematic lighting, natural color grading, shallow depth of field, 50mm lens, National Geographic style realism, peaceful winter mood",
+];
 
 const getSavedSession = () => {
     try {
@@ -16,6 +39,93 @@ const getSavedSession = () => {
         return null;
     }
 };
+
+async function scoreWithSuperPrompt(apiKey, superPrompt, playerPrompt) {
+    const body = {
+        contents: [{
+            parts: [{
+                text: `You are a judge for a prompt-writing game called PromptCraft.
+
+A player was shown an image and asked to describe it.
+
+MASTER DESCRIPTION (what the image actually shows):
+"${superPrompt}"
+
+PLAYER'S DESCRIPTION:
+"${playerPrompt}"
+
+Score the player's description from 0 to 100 based on:
+- Accuracy (40pts): Does it correctly identify the main subject and elements?
+- Detail (35pts): Does it mention specific colors, objects, mood, composition?
+- Creativity (25pts): Is the writing vivid, evocative, well-expressed?
+
+Respond ONLY with valid JSON, no markdown, no extra text:
+{"score": <number 0-100>, "feedback": "<one sentence explaining the score>"}`
+            }]
+        }]
+    };
+
+    let data = null;
+    let lastErrorMessage = "Gemini API error";
+
+    for (const model of GEMINI_MODEL_CANDIDATES) {
+        const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }
+        );
+
+        if (resp.ok) {
+            data = await resp.json();
+            break;
+        }
+
+        let errorMessage = "Gemini API error";
+        try {
+            const err = await resp.json();
+            errorMessage = err?.error?.message || errorMessage;
+        } catch (_) {
+            try {
+                const errText = await resp.text();
+                if (errText) errorMessage = errText;
+            } catch (_) {
+                // Keep default message.
+            }
+        }
+
+        lastErrorMessage = errorMessage;
+        const modelNotFound = /not found|not supported/i.test(errorMessage);
+        if (!modelNotFound) {
+            throw new Error(errorMessage);
+        }
+    }
+
+    if (!data) {
+        throw new Error(lastErrorMessage);
+    }
+
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const clean = text.replace(/```(?:json)?|```/gi, "").trim();
+
+    let parsed;
+    try {
+        parsed = JSON.parse(clean);
+    } catch (_) {
+        const jsonMatch = clean.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            throw new Error("Could not parse Gemini response.");
+        }
+        parsed = JSON.parse(jsonMatch[0]);
+    }
+
+    return {
+        score: Math.min(100, Math.max(0, Number(parsed?.score) || 0)),
+        feedback: typeof parsed?.feedback === 'string' ? parsed.feedback : 'Good effort.'
+    };
+}
 
 export default function App() {
     const saved = getSavedSession();
@@ -443,24 +553,6 @@ export default function App() {
         localStorage.removeItem(GAME_SESSION_KEY);
     };
 
-    const fetchImageAsBase64 = async (imagePath) => {
-        const response = await fetch(imagePath);
-        if (!response.ok) throw new Error("Image not found");
-        const blob = await response.blob();
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64data = reader.result.split(',')[1];
-                resolve({
-                    mimeType: blob.type || 'image/jpeg',
-                    data: base64data
-                });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
-    };
-
     const submitPrompt = async (e) => {
         e.preventDefault();
         if (!promptText.trim()) {
@@ -477,42 +569,13 @@ export default function App() {
         setApiError('');
 
         try {
-            const imagePath = `/images/image${currentRound}.png`;
-            const base64Image = await fetchImageAsBase64(imagePath);
+            const round = currentRound;
+            const apiKey = GEMINI_API_KEY;
+            const playerPrompt = promptText;
+            const superPrompt = SUPER_PROMPTS[round - 1];
+            const { score, feedback } = await scoreWithSuperPrompt(apiKey, superPrompt, playerPrompt);
 
-            const payload = {
-                contents: [
-                    {
-                        parts: [
-                            { text: `You are a judge for a prompt-writing game. The player was shown this image and wrote: '${promptText}'. Score 0-100 based on accuracy, detail, and descriptiveness. Respond ONLY with valid JSON, no markdown: {"score": <number>, "feedback": "<one sentence>"}` },
-                            {
-                                inline_data: {
-                                    mime_type: base64Image.mimeType,
-                                    data: base64Image.data
-                                }
-                            }
-                        ]
-                    }
-                ]
-            };
-
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                throw new Error(`API returned ${response.status}`);
-            }
-
-            const result = await response.json();
-            const textResponse = result.candidates[0].content.parts[0].text.trim();
-
-            let cleanJson = textResponse.replace(/^```(json)?\s*/i, '').replace(/```$/i, '').trim();
-            const parsed = JSON.parse(cleanJson);
-
-            let finalScore = Math.max(0, Math.min(100, Number(parsed.score) || 0));
+            let finalScore = Math.max(0, Math.min(100, Number(score) || 0));
             const totalSoFar = getTotal(scoresRef.current.map((s) => s.score)) + finalScore;
 
             await publishRoomEvent('round-complete', {
@@ -524,11 +587,12 @@ export default function App() {
 
             setRoundResult({
                 score: finalScore,
-                feedback: parsed.feedback || "Good effort."
+                feedback: feedback || "Good effort."
             });
 
         } catch (err) {
-            setApiError("Validation error. Ensure API keys are correct or try reloading.");
+            const message = err instanceof Error ? err.message : "Validation error. Ensure API keys are correct or try reloading.";
+            setApiError(message);
             console.error(err);
         } finally {
             setIsLoading(false);
