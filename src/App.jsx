@@ -646,6 +646,11 @@ export default function App() {
         return (
             <div className="container landing-layout">
                 <div className="landing-form-panel">
+                    <div className="club-header">
+                        <img src="/images/logo.png" alt="Gen AI Club Logo" className="club-logo" />
+                        <p className="club-name">GEN AI CLUB</p>
+                    </div>
+
                     <div className="logo">
                         <h2>PROMPT</h2>
                         <h2>CRAFT <span className="logo-star">✦</span></h2>
